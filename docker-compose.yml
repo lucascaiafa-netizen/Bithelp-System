@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  front-app:
+    build: .
+    container_name: nome-do-container
+    restart: always
+    ports:
+      - "8501:8501"
+    volumes:
+      - .:/app
+      - ./.streamlit:/app/.streamlit
+      
