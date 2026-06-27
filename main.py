@@ -120,6 +120,13 @@ if sistema_login():
 
     def carregar_chamados():
         try:
+            response = supabase.table("chamados").select("*, maquinas(identificacao)").eq("finalizado", False).execute()
+            return pd.DataFrame(response.data)
+        except:
+            return pd.DataFrame()
+        
+    def carregar_todos_chamados():
+        try:
             response = supabase.table("chamados").select("*, maquinas(identificacao)").execute()
             return pd.DataFrame(response.data)
         except:
@@ -145,26 +152,27 @@ if sistema_login():
             except:
                 pass
         
-        # Carrega os chamados
-        df_chamados = carregar_chamados()
+        # CARREGA TODOS OS CHAMADOS (SEM FILTRO DE FINALIZADO)
+        df_chamados = carregar_todos_chamados()
         if df_chamados.empty:
             return None
         
         df_chamados['created_at'] = pd.to_datetime(df_chamados['created_at'])
         
-        # Filtra chamados do mês
+        # FILTRA CHAMADOS DO MÊS
         df_mes = df_chamados[
             (df_chamados['created_at'].dt.year == ano) & 
             (df_chamados['created_at'].dt.month == mes)
         ]
         
+        # SE NÃO HOUVER CHAMADOS NO MÊS, RETORNA NONE
         if df_mes.empty:
             return None
         
-        # Carrega o histórico
+        # CARREGA O HISTÓRICO
         df_hist = carregar_historico()
         
-        # Chamados resolvidos (apenas do mês)
+        # CHAMADOS RESOLVIDOS (APENAS DO MÊS)
         chamados_resolvidos = 0
         if not df_hist.empty:
             df_hist['created_at'] = pd.to_datetime(df_hist['created_at'])
@@ -184,11 +192,11 @@ if sistema_login():
             
             chamados_resolvidos = len(df_mes[df_mes['id'].isin(ids_finalizados)])
         
-        # Métricas
+        # MÉTRICAS
         total_chamados = len(df_mes)
         taxa_resolucao = (chamados_resolvidos / total_chamados * 100) if total_chamados > 0 else 0
         
-        # Ranking
+        # RANKING (APENAS DO MÊS)
         ranking_aberturas = {}
         if not df_hist.empty:
             df_hist_aberturas = df_hist[
@@ -201,9 +209,11 @@ if sistema_login():
                 ranking_aberturas[usuario] = ranking_aberturas.get(usuario, 0) + 1
         
         ranking_ordenado = sorted(ranking_aberturas.items(), key=lambda x: x[1], reverse=True)[:5] if ranking_aberturas else []
+        
+        # PRIORIDADES (APENAS DO MÊS)
         prioridades = df_mes['prioridade'].value_counts()
         
-        # Criar PDF
+        # CRIA O PDF
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
         pdf_path = temp_file.name
         temp_file.close()
@@ -212,11 +222,25 @@ if sistema_login():
         styles = getSampleStyleSheet()
         elementos = []
         
-        # Títulos
-        titulo_style = ParagraphStyle('Titulo', parent=styles['Heading1'], fontSize=24, textColor=colors.HexColor('#1E40AF'), alignment=1, spaceAfter=20)
-        subtitulo_style = ParagraphStyle('Subtitulo', parent=styles['Heading2'], fontSize=14, textColor=colors.grey, alignment=1, spaceAfter=30)
+        # Título
+        titulo_style = ParagraphStyle(
+            'Titulo',
+            parent=styles['Heading1'],
+            fontSize=24,
+            textColor=colors.HexColor('#1E40AF'),
+            alignment=1,
+            spaceAfter=20
+        )
+        subtitulo_style = ParagraphStyle(
+            'Subtitulo',
+            parent=styles['Heading2'],
+            fontSize=14,
+            textColor=colors.grey,
+            alignment=1,
+            spaceAfter=30
+        )
         
-        # Cabeçalho
+        # ===== CABEÇALHO =====
         titulo = Paragraph("BITHELP <br/>GEARTECH SOLUTIONS", titulo_style)
         subtitulo = Paragraph(f"RELATÓRIO GERENCIAL DE CHAMADOS", subtitulo_style)
         
@@ -229,7 +253,10 @@ if sistema_login():
         except:
             logo_elemento = ""
         
-        dados_cabecalho = [[titulo, logo_elemento], [subtitulo, ""]]
+        dados_cabecalho = [
+            [titulo, logo_elemento],
+            [subtitulo, ""]
+        ]
         cabecalho_tabela = Table(dados_cabecalho, colWidths=[400, 100])
         cabecalho_tabela.setStyle(TableStyle([
             ('VALIGN', (0, 0), (-1, -1), 'TOP'),
@@ -238,6 +265,7 @@ if sistema_login():
             ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
             ('TOPPADDING', (0, 0), (-1, -1), 0),
         ]))
+        
         elementos.append(cabecalho_tabela)
         elementos.append(Spacer(1, 10))
         
@@ -251,11 +279,65 @@ if sistema_login():
         elementos.append(Spacer(1, 10))
         
         dados_resumo = [
-            ['Chamados Abertos no Mês', str(total_chamados)],
-            ['Chamados Resolvidos no Mês', str(chamados_resolvidos)],
+            ['Chamados Registrados', str(total_chamados)],
+            ['Chamados Resolvidos', str(chamados_resolvidos)],
             ['Taxa de Resolução', f"{taxa_resolucao:.1f}%"],
         ]
         
+        # TEMPO MÉDIO DE RESOLUÇÃO (se houver chamados resolvidos)
+        if chamados_resolvidos > 0:
+            tempo_medio_resolucao = None
+            if not df_hist.empty:
+                # Pega os IDs dos chamados finalizados no mês
+                ids_finalizados = []
+                df_hist_mes = df_hist[
+                    (df_hist['acao'] == 'FINALIZAR CHAMADO') &
+                    (df_hist['created_at'].dt.year == ano) &
+                    (df_hist['created_at'].dt.month == mes)
+                ]
+                
+                for _, row in df_hist_mes.iterrows():
+                    detalhes = row.get('detalhes', '')
+                    match = re.search(r'Chamado (\d+)', str(detalhes))
+                    if match:
+                        ids_finalizados.append(int(match.group(1)))
+                
+                # Calcular o tempo de cada chamado
+                tempos = []
+                for chamado_id in ids_finalizados:
+                    chamado = df_mes[df_mes['id'] == chamado_id]
+                    if not chamado.empty:
+                        data_abertura = chamado.iloc[0]['created_at']
+                        data_finalizacao = df_hist_mes[df_hist_mes['detalhes'].str.contains(str(chamado_id))].iloc[0]['created_at']
+                        tempo = (data_finalizacao - data_abertura).total_seconds() / 3600
+                        tempos.append(tempo)
+                
+                if tempos:
+                    tempo_medio_resolucao = sum(tempos) / len(tempos)
+            
+            if tempo_medio_resolucao is not None:
+                # Formatar o tempo
+                if tempo_medio_resolucao < 1:
+                    minutos = int(tempo_medio_resolucao * 60)
+                    tempo_formatado = f"{minutos} min"
+                elif tempo_medio_resolucao < 24:
+                    horas = int(tempo_medio_resolucao)
+                    minutos = int((tempo_medio_resolucao - horas) * 60)
+                    if minutos > 0:
+                        tempo_formatado = f"{horas}h {minutos}min"
+                    else:
+                        tempo_formatado = f"{horas}h"
+                else:
+                    dias = int(tempo_medio_resolucao / 24)
+                    horas = int(tempo_medio_resolucao % 24)
+                    if horas > 0:
+                        tempo_formatado = f"{dias}d {horas}h"
+                    else:
+                        tempo_formatado = f"{dias}d"
+                
+                dados_resumo.append(['Tempo Médio de Resolução', tempo_formatado])
+        
+        # ===== TABELA DO RESUMO =====
         tabela_resumo = Table(dados_resumo, colWidths=[270, 80])
         tabela_resumo.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (0, -1), colors.HexColor('#1E40AF')),
@@ -276,36 +358,7 @@ if sistema_login():
         ]))
         elementos.append(tabela_alinhada)
         elementos.append(Spacer(1, 20))
-        
-        # ===== RANKING =====
-        if ranking_ordenado:
-            elementos.append(Paragraph("<b><font size=14>👥 RANKING DE ABERTURAS (TOTAL GERAL)</font></b>", styles['Heading3']))
-            elementos.append(Spacer(1, 10))
-            
-            dados_ranking = [['Usuário', 'Chamados Abertos']]
-            dados_ranking.extend(ranking_ordenado)
-            
-            tabela_ranking = Table(dados_ranking, colWidths=[200, 110])
-            tabela_ranking.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1E40AF')),
-                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                ('FONTSIZE', (0, 0), (-1, -1), 10),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-                ('TOPPADDING', (0, 0), (-1, -1), 6),
-                ('GRID', (0, 0), (-1, -1), 1, colors.grey),
-                ('BACKGROUND', (1, 1), (1, -1), colors.HexColor('#F3F4F6')),
-            ]))
-            
-            tabela_alinhada = Table([[tabela_ranking]], colWidths=[400])
-            tabela_alinhada.setStyle(TableStyle([
-                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-            ]))
-            elementos.append(tabela_alinhada)
-            elementos.append(Spacer(1, 20))
-        
+                
         # ===== PRIORIDADES =====
         if not prioridades.empty:
             elementos.append(Paragraph("<b><font size=14>⚡ CHAMADOS POR PRIORIDADE</font></b>", styles['Heading3']))
@@ -349,6 +402,7 @@ if sistema_login():
             elementos.append(Spacer(1, 3))
         
         dados_tabela = [df_exibicao.columns.tolist()] + df_exibicao.values.tolist()
+        
         col_widths = [40, 70, 60, 200, 60]
         
         tabela_detalhada = Table(dados_tabela, colWidths=col_widths, repeatRows=1)
@@ -366,9 +420,9 @@ if sistema_login():
         ]))
         
         elementos.append(tabela_detalhada)
-        elementos.append(Spacer(1, 5))
         
         # Rodapé
+        elementos.append(Spacer(1, 106))  
         elementos.append(Paragraph("<i>Relatório gerado automaticamente pelo sistema Bithelp - GearTech Solutions</i>", styles['Italic']))
         
         # Gerar PDF
@@ -1517,14 +1571,23 @@ if sistema_login():
                                         "anomalia": ""
                                     }).eq("id", maquina_id).execute()
                                     
+                                    # Marcar chamado como finalizado
+                                    supabase.table("chamados").update({
+                                        "finalizado": True,
+                                        "status": "finalizado"
+                                    }).eq("id", id_excluir).execute()
+                                    
                                     # Registrar no histórico a ação automatizada
                                     registrar_historico("FINALIZAR CHAMADO", f"Chamado {id_excluir} finalizado. Máquina {comp_ref} restaurada para OK.")
                                     
                             except Exception as e:
                                 st.error(f"Erro ao restaurar máquina: {e}")
-                            
-                            # Deletar o chamado
-                            supabase.table("chamados").delete().eq("id", id_excluir).execute()
+
+                            # Marcar chamado como finalizado e atualizar status
+                            supabase.table("chamados").update({
+                            "finalizado": True,
+                            "status": "finalizado"
+                            }).eq("id", id_excluir).execute()
                             st.toast(f"✅ Chamado {id_excluir} finalizado! Máquina restaurada para OK.", icon='✅')
                             st.rerun()
             else: 
